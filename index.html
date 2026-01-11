@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Webmap — Bâtiment / Parcelle / Zones à débroussailler</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    html,body,#map { height:100%; margin:0; padding:0; }
+    .info { background:white; padding:8px; border-radius:6px; box-shadow:0 0 6px rgba(0,0,0,0.15); font-family:sans-serif; font-size:13px; }
+    #searchBox { position:absolute; top:10px; left:50px; z-index:1000; background:white; padding:6px 8px; border-radius:6px; box-shadow:0 0 6px rgba(0,0,0,0.2); font-family:sans-serif; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="searchBox">
+  <input id="addressInput" type="text" placeholder="Rechercher une adresse…" style="width:220px;" />
+  <button id="searchBtn">🔍</button>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+<script>
+const map = L.map('map').setView([48.8566, 2.3522], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+
+// --- Styles ---
+function styleBatiment(){ return { color:'#1f78b4', weight:2, fillOpacity:0.2 }; }
+function styleBatimentSelected(){ return { color:'#08306b', weight:3, fillOpacity:0.35 }; }
+function styleParcelle(){ return { color:'#000000', weight:1, fillOpacity:0 }; }
+function styleParcelleSelected(){ return { color:'#e31a1c', weight:2, fillOpacity:0 }; }
+function styleZone(feature){
+  const name = feature.properties && feature.properties.name;
+  if(name === 'Zone non urbaine à débroussailler par le propriétaire du bâtiment') return { color:'#66c2a5', weight:2, fillOpacity:0.4 };
+  if(name === 'Zone urbaine à débroussailler par le propriétaire de la parcelle') return { color:'#fdb863', weight:2, fillOpacity:0.4 };
+  return { color:'#999999', weight:2, fillOpacity:0.3 };
+}
+
+let batimentsLayer = null, parcellesLayer = null, zonesAll = null, activeZonesLayer = null;
+let selectedBatimentLayer = null, selectedParcelleLayer = null;
+
+function clearSelection(){
+  if(selectedBatimentLayer){ selectedBatimentLayer.setStyle(styleBatiment()); selectedBatimentLayer = null; }
+  if(selectedParcelleLayer){ selectedParcelleLayer.setStyle(styleParcelle()); selectedParcelleLayer = null; }
+  if(activeZonesLayer){ map.removeLayer(activeZonesLayer); activeZonesLayer = null; }
+}
+map.on('click', () => clearSelection());
+
+// --- Recherche d'adresse ---
+let searchMarker = null;
+document.getElementById('searchBtn').addEventListener('click', searchAddress);
+document.getElementById('addressInput').addEventListener('keydown', e=>{ if(e.key==='Enter') searchAddress(); });
+function searchAddress(){
+  const query = document.getElementById('addressInput').value.trim();
+  if(!query) return;
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+  fetch(url, { headers:{ 'Accept-Language':'fr' } })
+    .then(r=>r.json()).then(results=>{
+      if(results.length===0){ alert('Adresse introuvable'); return; }
+      const r = results[0];
+      const lat = parseFloat(r.lat), lon = parseFloat(r.lon);
+      if(searchMarker) map.removeLayer(searchMarker);
+      searchMarker = L.marker([lat, lon]).addTo(map).bindPopup(`<strong>${r.display_name}</strong>`).openPopup();
+      map.setView([lat, lon], 18);
+    }).catch(err=>{ console.error(err); alert("Erreur lors de la recherche d'adresse"); });
+}
+
+// --- Chargement des données ---
+Promise.all([
+  fetch('data/batiments.geojson').then(r=>r.json()),
+  fetch('data/parcelles.geojson').then(r=>r.json()),
+  fetch('data/zones.geojson').then(r=>r.json())
+]).then(([batiments, parcelles, zones]) => {
+
+  parcellesLayer = L.geoJSON(parcelles, { style: styleParcelle, onEachFeature: function(feature, layer){
+    layer.on('click', function(e){
+      L.DomEvent.stopPropagation(e);
+      clearSelection();
+      selectedParcelleLayer = layer;
+      layer.setStyle(styleParcelleSelected());
+
+      let popupContent = '<strong>Parcelle</strong>';
+      if(feature.properties && feature.properties.id){ popupContent += '<br>ID : ' + feature.properties.id; }
+      try {
+        if(feature.geometry){
+          let area = turf.area(feature); // m²
+          if(area > 10000){
+            area = (area/10000).toFixed(2).replace('.', ',');
+            popupContent += '<br>Surface : ' + area + ' hectare';
+          } else {
+            popupContent += '<br>Surface : ' + Math.round(area) + ' m²';
+          }
+        }
+      } catch(e){ console.warn('Erreur calcul surface parcelle', e); }
+
+      layer.bindPopup(popupContent).openPopup();
+    });
+  }}).addTo(map);
+
+  batimentsLayer = L.geoJSON(batiments, { style: styleBatiment, onEachFeature: function(feature, layer){
+    const name = feature.properties && feature.properties.name ? feature.properties.name : 'Bâtiment';
+    layer.bindTooltip(name);
+    layer.on('click', function(e){
+      L.DomEvent.stopPropagation(e);
+      clearSelection();
+      selectedBatimentLayer = layer;
+      layer.setStyle(styleBatimentSelected());
+      onBatimentClick(feature);
+    });
+  }}).addTo(map);
+
+  zonesAll = zones;
+  try{ const bounds = L.featureGroup([parcellesLayer, batimentsLayer]).getBounds(); if(bounds.isValid()) map.fitBounds(bounds.pad(0.2)); }catch(e){}
+
+}).catch(err => { console.error(err); alert('Erreur lors du chargement des données GeoJSON'); });
+
+function onBatimentClick(featureBat){
+  const id = featureBat.properties && featureBat.properties.id;
+  if(!id) return;
+  const subset = { type:'FeatureCollection', features: (zonesAll.features || []).filter(f=>f.properties && f.properties.id_parent===id) };
+  if(subset.features.length===0) return;
+
+  activeZonesLayer = L.geoJSON(subset, { style: styleZone, onEachFeature: function(feature, layer){
+    const name = feature.properties && feature.properties.name ? feature.properties.name : 'Zone';
+    let surfaceTxt = '';
+    if(name==='Zone non urbaine à débroussailler par le propriétaire du bâtiment'){ try{ const area = turf.area(feature); surfaceTxt = '<br><em>Surface : '+area.toFixed(0)+' m²</em>'; }catch(e){console.warn('Erreur Turf:',e);} }
+    const tooltipContent = '<strong>'+name+'</strong>'+surfaceTxt;
+    let bgColor = '#999999';
+    if(name==='Zone non urbaine à débroussailler par le propriétaire du bâtiment') bgColor='#66c2a5';
+    if(name==='Zone urbaine à débroussailler par le propriétaire de la parcelle') bgColor='#fdb863';
+    layer.bindTooltip(tooltipContent,{ sticky:true, direction:'top', opacity:0.95, className:'zone-tooltip' });
+    layer.on('tooltipopen', function(e){ const tooltipEl = e.tooltip.getElement(); if(tooltipEl){ tooltipEl.style.backgroundColor=bgColor; tooltipEl.style.border='1px solid #555'; tooltipEl.style.color='#000'; tooltipEl.style.fontWeight='bold'; } });
+  }}).addTo(map);
+
+  try{ const b = activeZonesLayer.getBounds(); if(b.isValid()) map.fitBounds(b.pad(0.2)); }catch(e){}
+}
+
+const info = L.control({position:'topright'});
+info.onAdd=function(){
+  const div = L.DomUtil.create('div','info');
+  div.innerHTML=`<strong>Couches</strong><br>
+    <span style="color:#1f78b4">■</span> Bâtiment<br>
+    <span style="color:#000">▢</span> Parcelle<br><br>
+    <strong>Zones à débroussailler</strong><br>
+    <span style="color:#66c2a5">■</span> Zone non urbaine<br>
+    <span style="color:#fdb863">■</span> Zone urbaine`;
+  return div;
+};
+info.addTo(map);
+</script>
+</body>
+</html>

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Webmap — Bâtiment / Parcelle / Zones à débroussailler</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    html,body,#map { height:100%; margin:0; padding:0; }
+    .info { background:white; padding:8px; border-radius:6px; box-shadow:0 0 6px rgba(0,0,0,0.15); font-family:sans-serif; font-size:13px; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/*
+  Couches :
+  - Bâtiment (polygones cliquables)
+  - Parcelle (polygones affichés en permanence, contour visible, remplissage transparent)
+  - Zone à débroussailler (polygones filtrés par id_parent et stylés selon l'attribut "name")
+*/
+
+const map = L.map('map').setView([48.8566, 2.3522], 12);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// --- Styles ---
+function styleBatiment(){
+  return { color:'#1f78b4', weight:2, fillOpacity:0.2 };
+}
+
+function styleParcelle(){
+  return { color:'#000000', weight:1, fillOpacity:0 };
+}
+
+function styleZone(feature){
+  const name = feature.properties && feature.properties.name;
+
+  if(name === 'Zone non urbaine à débroussailler par le propriétaire du bâtiment'){
+    return { color:'#66c2a5', weight:2, fillOpacity:0.4 }; // vert clair
+  }
+
+  if(name === 'Zone urbaine à débroussailler par le propriétaire de la parcelle'){
+    return { color:'#fdb863', weight:2, fillOpacity:0.4 }; // orange pâle
+  }
+
+  // style par défaut
+  return { color:'#999999', weight:2, fillOpacity:0.3 };
+}
+
+let batimentsLayer = null;
+let parcellesLayer = null;
+let zonesAll = null;
+let activeZonesLayer = null;
+
+// --- Chargement des données ---
+Promise.all([
+  fetch('data/batiments.geojson').then(r=>r.json()),
+  fetch('data/parcelles.geojson').then(r=>r.json()),
+  fetch('data/zones.geojson').then(r=>r.json())
+]).then(([batiments, parcelles, zones]) => {
+
+  // Parcelles (toujours visibles)
+  parcellesLayer = L.geoJSON(parcelles, {
+    style: styleParcelle,
+    onEachFeature: function(feature, layer){
+      if(feature.properties && feature.properties.id){
+        layer.bindPopup('<strong>Parcelle</strong><br>ID : ' + feature.properties.id);
+      }
+    }
+  }).addTo(map);
+
+  // Bâtiments (cliquables)
+  batimentsLayer = L.geoJSON(batiments, {
+    style: styleBatiment,
+    onEachFeature: function(feature, layer){
+      const name = feature.properties && feature.properties.name ? feature.properties.name : 'Bâtiment';
+      layer.bindTooltip(name);
+      layer.on('click', () => onBatimentClick(feature));
+    }
+  }).addTo(map);
+
+  zonesAll = zones;
+
+  // Zoom initial sur l'ensemble
+  try{
+    const bounds = L.featureGroup([parcellesLayer, batimentsLayer]).getBounds();
+    if(bounds.isValid()) map.fitBounds(bounds.pad(0.2));
+  }catch(e){}
+
+}).catch(err => {
+  console.error(err);
+  alert('Erreur lors du chargement des données GeoJSON');
+});
+
+// --- Interaction : clic sur un bâtiment ---
+function onBatimentClick(featureBat){
+  const id = featureBat.properties && featureBat.properties.id;
+  if(!id){ alert('Bâtiment sans identifiant id'); return; }
+
+  if(activeZonesLayer){
+    map.removeLayer(activeZonesLayer);
+    activeZonesLayer = null;
+  }
+
+  const subset = {
+    type: 'FeatureCollection',
+    features: (zonesAll.features || []).filter(f => f.properties && f.properties.id_parent === id)
+  };
+
+  if(subset.features.length === 0){
+    alert('Aucune zone à débroussailler liée à ce bâtiment');
+    return;
+  }
+
+  activeZonesLayer = L.geoJSON(subset, {
+    style: styleZone,
+    onEachFeature: function(feature, layer){
+      const n = feature.properties && feature.properties.name ? feature.properties.name : 'Zone';
+      layer.bindPopup('<strong>' + n + '</strong>');
+    }
+  }).addTo(map);
+
+  try{
+    const b = activeZonesLayer.getBounds();
+    if(b.isValid()) map.fitBounds(b.pad(0.2));
+  }catch(e){}
+}
+
+// --- Légende / info ---
+const info = L.control({position:'topright'});
+info.onAdd = function(){
+  const div = L.DomUtil.create('div','info');
+  div.innerHTML = `
+    <strong>Couches</strong><br>
+    <span style="color:#1f78b4">■</span> Bâtiment (cliquer)<br>
+    <span style="color:#000">▢</span> Parcelle<br><br>
+    <strong>Zones à débroussailler</strong><br>
+    <span style="color:#66c2a5">■</span> Zone non urbaine (bâtiment)<br>
+    <span style="color:#fdb863">■</span> Zone urbaine (parcelle)
+  `;
+  return div;
+};
+info.addTo(map);
+
+</script>
+</body>
+</html>
